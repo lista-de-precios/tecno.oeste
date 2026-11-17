@@ -88,6 +88,11 @@
     col.col-usd  { width: 100px; }
     col.col-ars  { width: 130px; }
 
+    .cat-row .cat-warranty { font-weight: 400; font-size: 11px; color: #9aa3ad; margin-left: 10px; font-family: var(--mono); letter-spacing: 0.03em; }
+    .badge { display: inline-block; font-family: var(--mono); font-size: 10px; font-weight: 500; padding: 2px 7px; border-radius: 3px; margin-left: 8px; vertical-align: 1px; letter-spacing: 0.04em; text-transform: uppercase; }
+    .badge-oferta { background: #ffe4e1; color: #c0262d; }
+    .badge-novedad { background: #e3edff; color: #1a55c9; }
+
     .empty-row td { text-align: center; padding: 3rem; color: var(--muted); font-family: var(--mono); font-size: 13px; }
 
     .page-footer { max-width: 1200px; margin: 0 auto 2rem; padding: 0 2rem; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
@@ -105,7 +110,7 @@
 <nav>
   <a href="#" class="logo">Tecno<span>.</span>Oeste</a>
   <div class="nav-right">
-    <div class="tc-display">USD → ARS: <strong id="tc-nav">$Cargando...</strong></div>
+    <div class="tc-display">USD → ARS: <strong id="tc-nav">…</strong></div>
   </div>
 </nav>
 
@@ -142,51 +147,159 @@
 
 <div class="page-footer">
   <span class="footer-count" id="footer-count"></span>
-  <span class="footer-count">Tecno.Oeste &copy; 2025</span>
+  <span class="footer-count">Tecno.Oeste &copy; 2026</span>
 </div>
 
 <script>
-// CONFIGURACIÓN DE GOOGLE SHEETS
-const SHEET_ID = "1NzYu2WBVc0JiYDmA_SYF-s1_jHmw63lR51zNXDWu29A";
-const CONFIG_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Configuracion`;
-const PRODUCTOS_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Productos`;
+// ===== LECTURA DE LA LISTA DE PRECIOS (Google Sheets) =====
+// La planilla tiene que estar compartida como "Cualquier persona con el enlace · Lector".
+const SHEET_ID   = "190wlr3dU8sh6pItfsxx35fz2N0CnD_p6GX0Wg-MybWs";
+const SHEET_NAME = "CELULARES"; // nombre de la pestaña
+const SHEET_URL  = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&headers=0&sheet=${encodeURIComponent(SHEET_NAME)}`;
 
-let TC = parseFloat(localStorage.getItem("tc") || "1200");
+// CSV con comillas, comillas dobles escapadas y saltos de línea dentro de celdas
+function parseCSV(text) {
+  const rows = []; let row = [], cur = "", inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQ) {
+      if (c === '"') { if (text[i + 1] === '"') { cur += '"'; i++; } else inQ = false; }
+      else cur += c;
+    } else if (c === '"') inQ = true;
+    else if (c === ",") { row.push(cur); cur = ""; }
+    else if (c === "\n" || c === "\r") {
+      if (c === "\r" && text[i + 1] === "\n") i++;
+      row.push(cur); rows.push(row); row = []; cur = "";
+    } else cur += c;
+  }
+  if (cur !== "" || row.length) { row.push(cur); rows.push(row); }
+  return rows;
+}
 
+// "USD1.290,00" -> 1290 · "$1.182.600,00" -> 1182600 · "730" -> 730
+function parseNum(s) {
+  if (s == null) return NaN;
+  let t = String(s).replace(/[^0-9.,]/g, "");
+  if (!t) return NaN;
+  if (t.includes(",")) t = t.replace(/\./g, "").replace(",", ".");
+  else if (/^\d{1,3}(\.\d{3})+$/.test(t)) t = t.replace(/\./g, "");
+  return parseFloat(t);
+}
+
+// Saca emojis y símbolos decorativos
+function cleanText(s) {
+  return String(s)
+    .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{2190}-\u{21FF}\u{25A0}-\u{25FF}\u{FE0F}\u{200D}*]/gu, " ")
+    .replace(/\s+/g, " ").trim();
+}
+
+function parseCategory(raw) {
+  const t = cleanText(raw);
+  const m = t.match(/\b(GARANT[IÍ]A|GTIA\.?)(.*)$/i);
+  let name = m ? t.slice(0, m.index) : t;
+  name = name.replace(/[\s\-–·|]+$/, "").trim();
+  const warranty = m ? ("Garantía" + m[2].replace(/\s+/g, " ")).trim() : "";
+  return { name: name || t, warranty };
+}
+
+function parseProduct(raw) {
+  let t = cleanText(raw);
+  const badges = [];
+  if (/\bOFERT(A|ON)\b/i.test(t)) badges.push("Oferta");
+  if (/\bNOVEDAD\b/i.test(t)) badges.push("Novedad");
+  t = t.replace(/\b(SUPER\s+)?OFERT(A|ON)\b|\bNOVEDAD\b/gi, " ").replace(/\s+/g, " ").trim();
+  return { name: t, badges };
+}
+
+// Devuelve { tc, fecha, categories:[{name,warranty,items:[{name,usd,ars,badges}]}] }
+function parseSheet(rows) {
+  let tc = NaN, fecha = "", cur = null;
+  const categories = [];
+  for (const r of rows) {
+    const cells = r.map(x => (x || "").trim());
+    const [a = "", b = "", c = "", d = ""] = cells;
+
+    const f = cells.join(" ").match(/LISTA DE PRECIOS\s+(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
+    if (f) { fecha = f[1]; continue; }
+
+    const di = cells.findIndex(x => /^d[oó]lar$/i.test(x));
+    if (di >= 0) { const v = parseNum(cells[di + 1]); if (v > 0) tc = v; continue; }
+
+    if (!a) continue;
+    const usd = parseNum(b), ars = parseNum(c);
+
+    if (usd > 0) {                       // fila de producto
+      if (cur) cur.items.push({ ...parseProduct(a), usd, ars: ars > 0 ? ars : NaN });
+      continue;
+    }
+    if (!isNaN(ars) || /especificaciones/i.test(d)) continue; // producto sin precio cargado
+    cur = { ...parseCategory(a), items: [] };                  // posible categoría
+    categories.push(cur);
+  }
+
+  const cats = categories.filter(c => c.items.length);
+  // Si no se encontró la fila "DOLAR", se deduce de la columna de pesos
+  if (!(tc > 0)) {
+    const ref = cats.flatMap(c => c.items).find(i => i.ars > 0);
+    if (ref) tc = ref.ars / ref.usd;
+  }
+  cats.forEach(c => c.items.forEach(i => { if (!(i.ars > 0)) i.ars = i.usd * tc; }));
+  return { tc, fecha, categories: cats };
+}
+
+async function loadPriceList() {
+  const res = await fetch(SHEET_URL, { cache: "no-store" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return parseSheet(parseCSV(await res.text()));
+}
+// ===== FIN LECTURA =====
+
+
+let TC = parseFloat(localStorage.getItem("tc") || "0");
 let data = [];
-
-const catOrder = ["Accesorios Apple","AirPods","iPad","iPhone","Mac","Apple Watch","Samsung","Xiaomi 4G","Xiaomi 5G","Motorola","Notebooks"];
+let catOrder = [];
+let warranties = {};
 let categories = ["Todas"];
 let activeFilter = "Todas";
 
-const now = new Date();
-document.getElementById("fecha-header").textContent =
-  "Actualizado: " + now.toLocaleDateString("es-AR", {day:"numeric", month:"long", year:"numeric"}) +
-  " · Precios en USD y ARS";
+function setFecha(fecha) {
+  const txt = fecha || new Date().toLocaleDateString("es-AR", {day:"numeric", month:"long", year:"numeric"});
+  document.getElementById("fecha-header").textContent = "Actualizado: " + txt + " · Precios en USD y ARS";
+}
+setFecha("");
 
 function updateTCDisplay() {
-  document.getElementById("tc-nav").textContent = "$" + Math.round(TC).toLocaleString("es-AR");
+  document.getElementById("tc-nav").textContent = TC > 0 ? "$" + Math.round(TC).toLocaleString("es-AR") : "—";
 }
 
 const chipsEl = document.getElementById("chips");
-function renderChips(){
-chipsEl.innerHTML="";
-categories.forEach(cat => {
-  const btn = document.createElement("button");
-  btn.className = "chip" + (cat === "Todas" ? " active" : "");
-  btn.textContent = cat;
-  btn.onclick = () => {
-    activeFilter = cat;
-    document.querySelectorAll(".chip").forEach(c => c.classList.remove("active"));
-    btn.classList.add("active");
-    applyFilters();
-  };
-  chipsEl.appendChild(btn);
-});
+function renderChips() {
+  chipsEl.innerHTML = "";
+  categories.forEach(cat => {
+    const btn = document.createElement("button");
+    btn.className = "chip" + (cat === activeFilter ? " active" : "");
+    btn.textContent = cat;
+    btn.onclick = () => {
+      activeFilter = cat;
+      document.querySelectorAll(".chip").forEach(c => c.classList.remove("active"));
+      btn.classList.add("active");
+      applyFilters();
+    };
+    chipsEl.appendChild(btn);
+  });
 }
 
-function fmtARS(usd) {
-  return "$" + Math.round(usd * TC).toLocaleString("es-AR");
+function esc(s) {
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
+function fmtARS(r) {
+  const v = r.ars > 0 ? r.ars : r.price * TC;
+  return "$" + Math.round(v).toLocaleString("es-AR");
+}
+
+function showMessage(msg) {
+  document.getElementById("tbody").innerHTML = `<tr class="empty-row"><td colspan="3">${msg}</td></tr>`;
 }
 
 function applyFilters() {
@@ -195,35 +308,31 @@ function applyFilters() {
   tbody.innerHTML = "";
   const filtered = data.filter(r => {
     const matchCat = activeFilter === "Todas" || r.cat === activeFilter;
-    const matchQ = !q || r.name.toLowerCase().includes(q) || r.cat.toLowerCase().includes(q) || r.code.toLowerCase().includes(q);
+    const matchQ = !q || r.name.toLowerCase().includes(q) || r.cat.toLowerCase().includes(q);
     return matchCat && matchQ;
   });
   document.getElementById("footer-count").textContent =
     filtered.length + " producto" + (filtered.length !== 1 ? "s" : "") + " mostrado" + (filtered.length !== 1 ? "s" : "");
-  if (filtered.length === 0) {
-    const tr = document.createElement("tr");
-    tr.className = "empty-row";
-    tr.innerHTML = '<td colspan="3">Sin resultados.</td>';
-    tbody.appendChild(tr);
-    return;
-  }
+  if (filtered.length === 0) { showMessage("Sin resultados."); return; }
+
   const grouped = {};
-  filtered.forEach(r => { if (!grouped[r.cat]) grouped[r.cat] = []; grouped[r.cat].push(r); });
-  const catList = catOrder.filter(c => grouped[c]);
+  filtered.forEach(r => { (grouped[r.cat] = grouped[r.cat] || []).push(r); });
   let groupIdx = 0;
-  catList.forEach(cat => {
+  catOrder.filter(c => grouped[c]).forEach(cat => {
     const catRow = document.createElement("tr");
     catRow.className = "cat-row";
-    catRow.innerHTML = `<td colspan="3">${cat}</td>`;
+    const w = warranties[cat] ? `<span class="cat-warranty">${esc(warranties[cat])}</span>` : "";
+    catRow.innerHTML = `<td colspan="3">${esc(cat)}${w}</td>`;
     tbody.appendChild(catRow);
     const cls = groupIdx % 2 === 0 ? "group-a" : "group-b";
     grouped[cat].forEach(r => {
+      const badges = r.badges.map(b => `<span class="badge badge-${b.toLowerCase()}">${b}</span>`).join("");
       const tr = document.createElement("tr");
       tr.className = cls;
       tr.innerHTML = `
-        <td class="product-cell">${r.name}</td>
+        <td class="product-cell">${esc(r.name)}${badges}</td>
         <td class="price-usd">US$ ${r.price.toLocaleString("en-US")}</td>
-        <td class="price-ars">${fmtARS(r.price)}</td>
+        <td class="price-ars">${fmtARS(r)}</td>
       `;
       tbody.appendChild(tr);
     });
@@ -231,64 +340,29 @@ function applyFilters() {
   });
 }
 
-
-async function fetchProductos() {
+// Inicialización de la página
+(async () => {
+  showMessage("Cargando precios…");
   try {
-    const response = await fetch(PRODUCTOS_URL);
-    const csv = await response.text();
-    const lines = csv.split("\n");
-    data = [];
-    for(let i=1;i<lines.length;i++){
-      const cols = lines[i].split(",").map(c=>c.replace(/"/g,"").trim());
-      if(cols.length<3) continue;
-      const precio=parseFloat(cols[2]);
-      if(!cols[0]||!cols[1]||isNaN(precio)) continue;
-      data.push({cat:cols[0],code:"",name:cols[1],price:precio});
-    }
-  } catch(e){ console.error(e); }
-}
-
-// FUNCIÓN PARA SOLICITAR EL VALOR DEL DÓLAR A GOOGLE SHEETS
-async function fetchDolarFromSheet() {
-  try {
-    const response = await fetch(CONFIG_URL);
-    if (!response.ok) throw new Error("Error en la conexión con la planilla");
-    const text = await response.text();
-    
-    // Procesa el CSV recibido. Busca el valor en la fila donde dice "Dolar"
-    const lines = text.split("\n");
-    for (let line of lines) {
-      const columns = line.split(",");
-      // Limpia comillas que Google suele meter en el CSV exportado
-      const key = columns[0]?.replace(/"/g, "").trim();
-      const value = columns[1]?.replace(/"/g, "").trim();
-      
-      if (key && key.toLowerCase() === "dolar") {
-        const parsedValue = parseFloat(value);
-        if (!isNaN(parsedValue) && parsedValue > 0) {
-          TC = parsedValue;
-          localStorage.setItem("tc", TC); // Guarda en memoria local por seguridad
-          break;
-        }
-      }
-    }
-  } catch (error) {
-    console.error("No se pudo obtener el TC online, usando valor de respaldo:", error);
-  } finally {
-    // Siempre actualiza la pantalla al finalizar el intento de carga
+    const lista = await loadPriceList();
+    if (lista.tc > 0) { TC = lista.tc; localStorage.setItem("tc", TC); }
+    setFecha(lista.fecha);
+    data = []; catOrder = []; warranties = {};
+    lista.categories.forEach(c => {
+      catOrder.push(c.name);
+      warranties[c.name] = c.warranty;
+      c.items.forEach(i => data.push({ cat: c.name, name: i.name, price: i.usd, ars: i.ars, badges: i.badges }));
+    });
+    if (!data.length) throw new Error("La planilla no devolvió productos");
+    categories = ["Todas", ...catOrder];
+    renderChips();
     updateTCDisplay();
     applyFilters();
+  } catch (e) {
+    console.error(e);
+    updateTCDisplay();
+    showMessage("No se pudo cargar la lista de precios. Intentá de nuevo en unos minutos.");
   }
-}
-
-// Inicialización de la página
-(async()=>{
- await fetchProductos();
- catOrder.length=0;
- [...new Set(data.map(x=>x.cat))].forEach(c=>catOrder.push(c));
- categories=["Todas",...catOrder];
- renderChips();
- await fetchDolarFromSheet();
 })();
 </script>
 </body>
